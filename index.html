@@ -30,6 +30,11 @@
                 z-index: 1;
             }
 
+            #preview > img {
+                border-radius: 10px;
+                pointer-events: auto;
+            }
+
             #scrolling-background {
                 position: fixed;
                 top: 0;
@@ -46,7 +51,7 @@
                 position: absolute;
                 left: 0;
                 width: 100%;
-                height: 200;
+                height: 210;
                 /* adjust to match JS rowHeight */
                 overflow: hidden;
                 pointer-events: auto;
@@ -68,7 +73,7 @@
             }
 
             .scroll-item img {
-                height: 200px;
+                height: 210px;
                 flex-shrink: 0;
                 border: 1px solid #444;
                 border-radius: 4px;
@@ -89,6 +94,7 @@
             }
 
             button {
+                border-radius: 10px;
                 padding: 10px 25px;
                 font-size: 18px;
                 margin: 5px;
@@ -130,8 +136,9 @@
                 position: relative;
                 z-index: 2;
                 cursor: pointer;
-                width: 25%;
+                width: 40%;
                 margin: 0 auto;
+                pointer-events: none;
             }
         </style>
     </head>
@@ -161,6 +168,7 @@
             import {
                 LevelRenderer
             } from './levelRenderer.js'; // adjust path as needed
+            
             const renderer = new LevelRenderer();
             const sources = {
                 'old-forum': [],
@@ -172,6 +180,9 @@
             let completed = 0;
             let skipped = 0;
 
+            // Image cache for better performance
+            const imageCache = new Map();
+            
             function normalizeDate(dateStr) {
                 const date = new Date(dateStr);
                 if (!isNaN(date)) {
@@ -180,20 +191,49 @@
                 return dateStr;
             }
 
+            // Track loading state
+            let dataLoaded = false;
+            let loadingPromises = [];
+
             function loadForumData(forumId, filename) {
-                fetch(filename).then((res) => res.json()).then((data) => {
+                const promise = fetch(filename).then((res) => res.json()).then((data) => {
                     sources[forumId] = data.map((entry) => ({
                         ...entry,
                         normalizedDate: normalizeDate(entry.date),
                     }));
                     console.log(`Loaded ${data.length} levels from ${filename}`);
+                    return data.length;
                 }).catch((err) => {
                     console.error(`Failed to load ${filename}`, err);
+                    return 0;
                 });
+                loadingPromises.push(promise);
+                return promise;
             }
-            loadForumData('old-forum', 'old.json');
-            loadForumData('new-forum', 'new.json');
-            loadForumData('ahlle', 'ahlle.json');
+
+            // Start loading all data immediately
+            Promise.all([
+                loadForumData('old-forum', 'old.json'),
+                loadForumData('new-forum', 'new.json'),
+                loadForumData('ahlle', 'ahlle.json')
+            ]).then(() => {
+                dataLoaded = true;
+                console.log('All level data loaded - website ready to use');
+                
+                // Update the UI to show it's ready
+                const generateBtn = document.getElementById('generate-btn');
+                if (generateBtn.disabled) {
+                    generateBtn.disabled = false;
+                    generateBtn.textContent = 'Start Run';
+                }
+                
+                // Now start loading background in the background
+                setTimeout(() => {
+                    loadScrollingBackground();
+                }, 100);
+            }).catch((err) => {
+                console.error('Failed to load some level data:', err);
+            });
 
             function shuffle(array) {
                 for (let i = array.length - 1; i > 0; i--) {
@@ -202,7 +242,22 @@
                 }
                 return array;
             }
+            
             async function startRun() {
+                // Check if data is loaded
+                if (!dataLoaded) {
+                    const generateBtn = document.getElementById('generate-btn');
+                    generateBtn.disabled = true;
+                    generateBtn.textContent = 'Loading...';
+                    
+                    // Wait for data to load
+                    await Promise.all(loadingPromises);
+                    dataLoaded = true;
+                    
+                    generateBtn.disabled = false;
+                    generateBtn.textContent = 'Start Run';
+                }
+                
                 const excludeAhlle = document.getElementById('exclude-ahlle').checked;
                 const excludeOld = document.getElementById('exclude-old').checked;
                 const excludeNew = document.getElementById('exclude-new').checked;
@@ -223,6 +278,7 @@
                 if (!code) return;
                 navigator.clipboard.writeText(code).catch((err) => console.error('Failed to copy code:', err));
             }
+            
             async function nextLevel() {
                 if (queue.length === 0) {
                     document.getElementById('code-display').innerText = 'Run complete!';
@@ -271,10 +327,17 @@
 			<button onclick="copyCodeToClipboard()">Copy Code</button>
       `;
                 updateStats();
-                // Render level preview image
+                
+                // Render level preview image with caching
                 try {
                     const levelData = LevelRenderer.getDataFromCode(current.code);
-                    const imageDataUrl = await renderer.renderLevelImage(levelData);
+                    let imageDataUrl = imageCache.get(current.code);
+                    
+                    if (!imageDataUrl) {
+                        imageDataUrl = await renderer.renderLevelImage(levelData);
+                        imageCache.set(current.code, imageDataUrl);
+                    }
+                    
                     document.getElementById('preview').innerHTML = `
 			
 			
@@ -315,95 +378,179 @@
             window.startRun = startRun;
             window.copyCodeToClipboard = copyCodeToClipboard;
             window.skipImpossible = skipImpossible;
-            // Load and scroll background level previews
+            
+            // Load and scroll background level previews - OPTIMIZED VERSION
             async function loadScrollingBackground() {
                 const bg = document.getElementById('scrolling-background');
                 if (!bg) return;
-                // 1) Wait for data
-                await new Promise(res => {
-                    const chk = () => {
-                        if (sources['old-forum'].length && sources['new-forum'].length && sources['ahlle'].length) res();
-                        else setTimeout(chk, 200);
-                    };
-                    chk();
-                });
+                
+                // Make sure data is loaded first
+                if (!dataLoaded) {
+                    console.log('Waiting for level data before loading background...');
+                    await Promise.all(loadingPromises);
+                }
+                
+                console.log('Starting background loading...');
+                
                 // 2) Prepare data & preload
                 const allLevels = [...sources['old-forum'], ...sources['new-forum'], ...sources['ahlle']];
                 await renderer.loadAssets();
+                
                 // 3) Settings
-                const ROWS = 5;
-                const PER_ROW = 10;
-                const ROW_H = 220; // px, matches .scroll-row height
+                const ROWS = 4;
+                const PER_ROW = 8;
+                const ROW_H = 235; // px, matches .scroll-row height
                 const GAP = 10; // px, matches CSS gap
-                const ITEM_W = 266.66; // px, matches .scroll-item width
+                const ITEM_W = 280; // px, matches .scroll-item width
                 const configs = [];
-                // 4) Build rows
+                
+                // 4) Pre-select levels for each row and render images
+                console.log('Pre-rendering background images...');
+                const batchSize = 3;
+                const rowLevels = [];
+                
+                // Pre-select levels for each row
+                for (let i = 0; i < ROWS; i++) {
+                    const slice = shuffle([...allLevels]).slice(0, PER_ROW);
+                    rowLevels.push(slice);
+                }
+                
+                // Batch render all selected images
+                const allSelectedLevels = rowLevels.flat();
+                const prerenderedImages = new Map();
+                
+                for (let i = 0; i < allSelectedLevels.length; i += batchSize) {
+                    const batch = allSelectedLevels.slice(i, i + batchSize);
+                    await Promise.all(batch.map(async lvl => {
+                        try {
+                            if (!prerenderedImages.has(lvl.code)) {
+                                const levelData = LevelRenderer.getDataFromCode(lvl.code);
+                                const imageDataUrl = await renderer.renderLevelImage(levelData);
+                                prerenderedImages.set(lvl.code, imageDataUrl);
+                            }
+                        } catch (e) {
+                            console.warn('Failed to render background image:', e);
+                        }
+                    }));
+                    
+                    // Yield control to prevent blocking
+                    await new Promise(resolve => setTimeout(resolve, 5));
+                }
+                
+                console.log('Background images pre-rendered');
+                
+                // 5) Build rows with pre-rendered images
                 for (let i = 0; i < ROWS; i++) {
                     const row = document.createElement('div');
                     row.className = 'scroll-row';
                     row.style.top = `${i * ROW_H}px`;
                     bg.appendChild(row);
+                    
                     const wrap = document.createElement('div');
                     wrap.className = 'scroll-wrapper';
                     row.appendChild(wrap);
-                    // pick a shuffled slice
-                    const slice = shuffle(allLevels).slice(0, PER_ROW);
+                    
+                    // Use the pre-selected levels for this row
+                    const slice = rowLevels[i];
+                    const items = [];
+                    
                     for (const lvl of slice) {
                         const w = document.createElement('div');
                         w.className = 'scroll-item';
+                        
                         const img = document.createElement('img');
-                        img.src = await renderer.renderLevelImage(LevelRenderer.getDataFromCode(lvl.code));
+                        const cachedImage = prerenderedImages.get(lvl.code);
+                        if (cachedImage) {
+                            img.src = cachedImage;
+                        } else {
+                            // This should rarely happen now, but keep as fallback
+                            console.warn('Missing cached image for level:', lvl.code);
+                            // Try to render it immediately
+                            try {
+                                const levelData = LevelRenderer.getDataFromCode(lvl.code);
+                                renderer.renderLevelImage(levelData).then(imageDataUrl => {
+                                    img.src = imageDataUrl;
+                                });
+                            } catch (e) {
+                                img.src = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjgwIiBoZWlnaHQ9IjIxMCIgdmlld0JveD0iMCAwIDI4MCAyMTAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxyZWN0IHdpZHRoPSIyODAiIGhlaWdodD0iMjEwIiBmaWxsPSIjMzMzIi8+Cjx0ZXh0IHg9IjE0MCIgeT0iMTA1IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmaWxsPSIjNjY2IiBmb250LWZhbWlseT0iQXJpYWwiIGZvbnQtc2l6ZT0iMTIiPkVycm9yPC90ZXh0Pjwvc3ZnPgo=';
+                            }
+                        }
+                        
                         w.appendChild(img);
+                        
                         const cap = document.createElement('div');
                         cap.className = 'scroll-caption';
-                        cap.innerText = lvl.username;
+                        cap.innerText = lvl.username || 'Unknown';
                         w.appendChild(cap);
+                        
                         w.addEventListener('click', e => {
                             e.stopPropagation();
                             navigator.clipboard.writeText(lvl.code).catch(() => console.error('Copy failed'));
                         });
+                        
                         wrap.appendChild(w);
+                        items.push({element: w, level: lvl});
                     }
-                    // store this row’s config
+                    
+                    // Store this row's config with pre-built elements
                     configs.push({
                         wrap,
+                        items,
                         count: slice.length,
                         itemW: ITEM_W + GAP,
                         offset: 0,
                         speed: (i % 2 === 0 ? 1 : -1) * (40 + Math.random() * 60) // alternate direction
                     });
                 }
-                // 5) Animate
+                
+                // 6) Optimized animation with requestAnimationFrame throttling
                 let last = performance.now();
-
+                let frameCount = 0;
+                
                 function animate(now) {
                     const dt = (now - last) / 1000;
                     last = now;
+                    
+                    // Throttle to 60fps max
+                    frameCount++;
+                    if (frameCount % 1 !== 0) {
+                        requestAnimationFrame(animate);
+                        return;
+                    }
+                    
                     configs.forEach(cfg => {
                         cfg.offset -= cfg.speed * dt;
-                        // when first item fully off-screen:
+                        
+                        // Optimized element reordering - avoid DOM manipulation when possible
                         if (cfg.speed > 0) {
                             // scrolling right → left
                             while (cfg.offset <= -cfg.itemW) {
                                 cfg.offset += cfg.itemW;
-                                cfg.wrap.appendChild(cfg.wrap.firstElementChild);
+                                const firstElement = cfg.wrap.firstElementChild;
+                                cfg.wrap.appendChild(firstElement);
                             }
                         } else {
-                            // scrolling left → right
+                            // scrolling left → right  
                             while (cfg.offset >= cfg.itemW - ITEM_W) {
                                 cfg.offset -= cfg.itemW;
-                                cfg.wrap.insertBefore(cfg.wrap.lastElementChild, cfg.wrap.firstElementChild);
+                                const lastElement = cfg.wrap.lastElementChild;
+                                cfg.wrap.insertBefore(lastElement, cfg.wrap.firstElementChild);
                             }
                         }
-                        // integer rounding to avoid sub-pixel jitter
-                        const x = cfg.offset;
+                        
+                        // Use transform3d for hardware acceleration and round to prevent sub-pixel rendering
+                        const x = Math.round(cfg.offset);
                         cfg.wrap.style.transform = `translate3d(${x}px, 0, 0)`;
                     });
+                    
                     requestAnimationFrame(animate);
                 }
+                
                 requestAnimationFrame(animate);
             }
-            loadScrollingBackground();
+            
+            // Don't start loading background automatically - wait for data first
+            // The background will be loaded after the main data is ready
         </script>
     </body>
 </html>
